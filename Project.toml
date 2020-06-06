@@ -1,0 +1,8 @@
+name = "EMST"
+uuid = "5b21420e-7f88-47dc-8bee-9d6e703bdb4d"
+authors = ["Duncan Garmonsway <duncan.garmonsway@digital.cabinet-office.gov.uk>"]
+version = "0.1.0"
+
+[deps]
+DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
+Distances = "b4f34e82-e78d-54a5-968a-f98e89d6e8f7"
