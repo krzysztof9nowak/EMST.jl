@@ -43,8 +43,8 @@ mutable struct DTBNode
     # splits::Array{DTBSplit,1}
 
     # kd tree node bounds
-    box_lb::Array{Float64,1}
-    box_ub::Array{Float64,1}
+    lb::Array{Float64,1}
+    ub::Array{Float64,1}
 
     # max_{v in this node} ( length of candidate edge of v)
     dQ::Float64
@@ -69,7 +69,7 @@ function hash(a::DTBNode)
     hash(a.id) # we could also drop this hash.. should not matter..
 end
 function is_leaf(n::DTBNode)
-    return n.a == n && n.b == n
+    return n.left == n && n.right == n
 end
 
 """
@@ -81,8 +81,6 @@ To build the tree use:
   kdtree_split!( kdt_root , 10 ) # 10 is the node size where we stop splitting
 """
 function kdtree(xx::Array{Float64,2})
-    # root = DTBNode(xx,-1,NaN,nothing,nothing)
-    # root = DTBNode(Int64(0),xx,collect(1:size(xx,2)),fill!(ones(size(xx,1)),-Inf),fill!(ones(size(xx,1)),Inf),Inf)
     root = DTBNode(Int64(0), xx, collect(Int64(1):Int64(size(xx, 2))), fill!(ones(size(xx, 1)), -Inf), fill!(ones(size(xx, 1)), Inf), Inf)
     return root
 end
@@ -116,12 +114,12 @@ function kdtree_split!(node::DTBNode, nmin::Int64)
     data_a = node.data[:,bx]
     data_b = node.data[:,.~bx]
 
-    box_lb_a = copy(node.box_lb)
-    box_ub_a = copy(node.box_ub)
+    box_lb_a = copy(node.lb)
+    box_ub_a = copy(node.ub)
     box_ub_a[ds] = vs
-    box_lb_b = copy(node.box_lb)
+    box_lb_b = copy(node.lb)
     box_lb_b[ds] = vs
-    box_ub_b     = copy(node.box_ub)
+    box_ub_b     = copy(node.ub)
 
     id::Int64 = node.id
     id_depth  = Int(ceil((64 - leading_zeros(id)) / 2)) + 1 # in this cell we are, i.e. we have to shift id_depth times left by two bits..
@@ -213,7 +211,7 @@ function fcn(q::DTBNode, r::DTBNode, e::IntDisjointSets, C_dcq::Dict{Int64,Float
     end
 
     # check d(Q,R) > d(Q)
-    dqr = computeDQR(q.box_lb, q.box_ub, r.box_lb, r.box_ub)
+    dqr = computeDQR(q, r)
     if ( dqr > q.dQ)
         return
     end
@@ -277,18 +275,18 @@ function fcn(q::DTBNode, r::DTBNode, e::IntDisjointSets, C_dcq::Dict{Int64,Float
 end
 
 
-"""
-  computeDQR( q_lb::Array{Float64,1} , q_ub::Array{Float64,1} , r_lb::Array{Float64,1} , r_ub::Array{Float64,1} )
 
-compute min dist. between bounding boxes, i.e. between rectangular boxes Q/R with
-bounds given by q_lb/q_ub and r_lb/r_ub
-"""
-function computeDQR(q_lb::Array{Float64,1}, q_ub::Array{Float64,1}, r_lb::Array{Float64,1}, r_ub::Array{Float64,1})
-    d::Int64  = length(q_lb)# size(q_lb,1)
-    rdists::Array{Float64}    = zeros(d)
-    for zd = 1:d
-        rdists[zd] = max(max(q_lb[zd] - r_ub[zd], r_lb[zd] - q_ub[zd]), 0)
+function intervals_distance(xl::Float64, xu::Float64, yl::Float64, yu::Float64) :: Float64
+    if xl <= yl <= xu || xl <= yu <= xu
+        return 0
     end
-    dqr::Float64 = sqrt(sum(rdists.^2))
-    return dqr
+    return min(abs(xl - yu), abs(yl - yu))
+end
+
+"""
+compute min dist. between bounding boxes, i.e. between rectangular boxes Q/R with
+"""
+function computeDQR(q::DTBNode, r::DTBNode)
+    rdists = [intervals_distance(xl, xu, yl, yu) for (xl, xu, yl, yu) in zip(q.lb, q.ub, r.lb, r.ub)]
+    return sqrt(sum(rdists.^2))
 end
