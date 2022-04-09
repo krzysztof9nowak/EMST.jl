@@ -6,6 +6,35 @@ using Statistics
 import Base.isequal
 import Base.hash
 
+
+
+function plot_debug(x, forest, edges::Set{Edge})
+    p = plot(legend=:none)
+
+    # points
+
+    roots = unique(forest.parents)
+    d = Dict(a => Vector() for a in roots)
+
+    for (i, xx) in enumerate(eachcol(x))
+        r = find_root!(forest, i)
+        push!(d[r], xx)
+    end
+
+    for component in values(d)
+        component = hcat(component...)
+        scatter!(component[1,:], component[2,:], ms=3.0)
+    end
+
+    # edges
+    m_edges = to_matrix(collect(edges))
+    for zr in 1:size(m_edges, 1)
+        plot!(x[1,m_edges[zr,:]], x[2,m_edges[zr,:]], linecolor=:gray)
+    end
+
+    return p
+end
+
 struct Edge
     a::Int64
     b::Int64
@@ -49,10 +78,14 @@ mutable struct DTBNode
     left::DTBNode
     right::DTBNode
 
-    function DTBNode(id::Int64, data::Array{Float64,2}, subset::Array{Int64}, box_lb::Array{Float64,1}, box_ub::Array{Float64,1}, dQ::Float64)
+    # list of forest roots
+    roots::Vector{Int64}
+
+    function DTBNode(id::Int64, data::Array{Float64,2}, subset::Array{Int64}, box_lb::Array{Float64,1}, box_ub::Array{Float64,1}, dQ::Float64, roots::Vector{Int64})
         n = new(id, data, subset, box_lb, box_ub, dQ)
         n.left = n
         n.right = n
+        n.roots = roots
         return n
     end
 end
@@ -76,7 +109,7 @@ To build the tree use:
   kdtree_split!( kdt_root , 10 ) # 10 is the node size where we stop splitting
 """
 function kdtree(xx::Array{Float64,2})
-    root = DTBNode(Int64(0), xx, collect(Int64(1):Int64(size(xx, 2))), fill!(ones(size(xx, 1)), -Inf), fill!(ones(size(xx, 1)), Inf), Inf)
+    root = DTBNode(Int64(0), xx, collect(Int64(1):Int64(size(xx, 2))), fill!(ones(size(xx, 1)), -Inf), fill!(ones(size(xx, 1)), Inf), Inf, collect(Int64(1):Int64(size(xx, 2))))
     return root
 end
 
@@ -92,7 +125,7 @@ function kdtree_split!(node::DTBNode, nmin::Int64)
     # t[node.id] = node
 
     if ( size(node.data, 2) <= nmin )
-    return node
+        return node
     end
 
     mind = minimum(node.data, dims=2)
@@ -121,13 +154,11 @@ function kdtree_split!(node::DTBNode, nmin::Int64)
     id_r = id   |  (2) << (2 * id_depth)
 
 
-    node_left  = kdtree_split!(DTBNode(id_l, data_a, range_a, box_lb_a, box_ub_a, Inf), nmin)
-    node_right = kdtree_split!(DTBNode(id_r, data_b, range_b, box_lb_b, box_ub_b, Inf), nmin)
+    node.left = DTBNode(id_l, data_a, range_a, box_lb_a, box_ub_a, Inf, range_a)
+    node.right = DTBNode(id_r, data_b, range_b, box_lb_b, box_ub_b, Inf, range_b)
 
-    node.left  = node_left
-    node.right = node_right
-
-    return node
+    kdtree_split!(node.left, nmin)
+    kdtree_split!(node.right, nmin)
 end
 
 """
@@ -141,7 +172,7 @@ function compute_emst(data::Array{Float64,2};nmin::Int=64)
     root = kdtree(data)
     kdtree_split!(root, nmin64)
     edges = dtb(root, IntDisjointSets(size(data, 2)))
-    return EMST.to_matrix(collect(edges))
+    return to_matrix(collect(edges))
 end
 
 
@@ -151,31 +182,47 @@ end
 implements the dual-tree Boruvka algorithm which computes the EMST for the
 given KD-tree.
 """
-function dtb(q::DTBNode, e::IntDisjointSets)
+function dtb(Q::DTBNode, forest::IntDisjointSets)
     edges = Set{Edge}()
 
-    while (e.ngroups > 1)
-        ngroups = e.ngroups;
+    while forest.ngroups > 1
+        ngroups = forest.ngroups;
         println("--> ngroups: $ngroups")
 
         # prepare dicts for candidate edges..
         C_dcq = Dict{Int64,Float64}()
         C_e   = Dict{Int64,Edge}()
         # init themz
-        roots = unique(e.parents)
+        roots = unique(forest.parents)
         for ri in roots
             C_dcq[ri] = Inf
         end
 
-        find_component_neighbors(q, q, e, C_dcq, C_e)
+        @time find_component_neighbors(Q, Q, forest, C_dcq, C_e)
+        sleep(3)
 
         # and now add the edges..
         for ne::Edge in values(C_e)
-            union!(e, ne.a, ne.b)
+            union!(forest, ne.a, ne.b)
             push!(edges, ne)
         end
+
+        @time update_node_roots(Q, forest)
+
+        p = plot_debug(Q.data, forest, edges)
+        gui(p)
     end
     return edges
+end
+
+function update_node_roots(Q::DTBNode, forest)
+    if is_leaf(Q)
+       Q.roots = unique([find_root!(forest, x) for x in Q.subset])
+    else
+        update_node_roots(Q.left, forest)
+        update_node_roots(Q.right, forest)
+        Q.roots = unique([Q.left.roots; Q.right.roots])
+    end
 end
 
 
@@ -187,16 +234,8 @@ C_dcq : component distances to candidate edges
 C_e   : component candidate edges (comp i candidate edge is C_e[:,i])
 """
 function find_component_neighbors(Q::DTBNode, R::DTBNode, forest::IntDisjointSets, C_dcq::Dict{Int64,Float64}, C_e::Dict{Int64,Edge})
-    # check all in same component
-    onecomp::Bool  = true
-    joined         = [Q.subset;R.subset]
-    for ji in joined
-        if !in_same_set(forest, joined[1], ji)
-            onecomp = false
-            break
-        end
-    end
-    if onecomp
+    # check R and Q contain only one tree
+    if length(Q.roots) == 1 && length(R.roots) == 1 && R.roots[1] == Q.roots[1]
         return
     end
 
@@ -204,23 +243,26 @@ function find_component_neighbors(Q::DTBNode, R::DTBNode, forest::IntDisjointSet
         return
     end
 
-    # check if R and Q in a leaf node
-    if ( is_leaf(Q) && is_leaf(R) )
+    if is_leaf(Q) && is_leaf(R)
         n_dQ::Float64 = Q.dQ
 
-        pairwise_d = Distances.pairwise(Euclidean(), Q.data, R.data, dims=2)
-        for (iq, qq) in enumerate(Q.subset), (ir, rr) in enumerate(R.subset)
+        pairwise_d = Distances.pairwise(Euclidean(), Q.data, R.data, dims=2) # O(nmin^2)
+        i=0
+        @inbounds for (iq, qq) in enumerate(Q.subset), (ir, rr) in enumerate(R.subset) # O(nmin^2) * O(log n)
             if in_same_set(forest, qq, rr)
                 continue
             end
 
-            cq = find_root(forest, rr) # tree of q
+            cq = find_root!(forest, qq) # tree of q, O(log n)
 
             dist_qr = pairwise_d[iq, ir]
             if dist_qr < C_dcq[ cq ]
                 C_dcq[ cq ] = dist_qr
                 C_e[ cq ]   = Edge(qq, rr)
-                n_dQ = max(n_dQ, dist_qr)
+                if dist_qr > n_dQ
+                    n_dQ = dist_qr
+                end
+                i += 1
             end
         end
         Q.dQ = n_dQ

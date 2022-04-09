@@ -1,4 +1,5 @@
-using EMST
+# using EMST
+include("../src/emst_dual_boruvka.jl")
 using Plots
 
 function plot_emst_2d(x, edges)
@@ -20,8 +21,8 @@ end
 
 
 x_test  = rand(2, 400)
-@time e_test  = EMST.compute_emst(x_test;nmin=64);
-verify_emst(x_test,e_test,200)
+@time e_test  = compute_emst(x_test;nmin=64);
+# verify_emst(x_test,e_test,200)
 plot_emst_2d(x_test,e_test)
 
 # x_test  = rand(3,400)
