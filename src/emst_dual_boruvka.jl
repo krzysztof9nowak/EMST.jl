@@ -6,35 +6,6 @@ using Statistics
 import Base.isequal
 import Base.hash
 
-
-
-function plot_debug(x, forest, edges::Set{Edge})
-    p = plot(legend=:none)
-
-    # points
-
-    roots = unique(forest.parents)
-    d = Dict(a => Vector() for a in roots)
-
-    for (i, xx) in enumerate(eachcol(x))
-        r = find_root!(forest, i)
-        push!(d[r], xx)
-    end
-
-    for component in values(d)
-        component = hcat(component...)
-        scatter!(component[1,:], component[2,:], ms=3.0)
-    end
-
-    # edges
-    m_edges = to_matrix(collect(edges))
-    for zr in 1:size(m_edges, 1)
-        plot!(x[1,m_edges[zr,:]], x[2,m_edges[zr,:]], linecolor=:gray)
-    end
-
-    return p
-end
-
 struct Edge
     a::Int64
     b::Int64
@@ -172,6 +143,16 @@ function compute_emst(data::Array{Float64,2};nmin::Int=64)
     root = kdtree(data)
     kdtree_split!(root, nmin64)
     edges = dtb(root, IntDisjointSets(size(data, 2)))
+
+    length :: Float64 = 0
+    for edge in edges
+        A = data[edge.a]
+        B = data[edge.b]
+        length += sqrt(sum((A .- B).^2))
+    end
+
+    @show length
+
     return to_matrix(collect(edges))
 end
 
@@ -195,11 +176,10 @@ function dtb(Q::DTBNode, forest::IntDisjointSets)
         # init themz
         roots = unique(forest.parents)
         for ri in roots
-            C_dcq[ri] = Inf
+            C_dcq[ri] = Infx
         end
 
         @time find_component_neighbors(Q, Q, forest, C_dcq, C_e)
-        sleep(3)
 
         # and now add the edges..
         for ne::Edge in values(C_e)
@@ -209,8 +189,8 @@ function dtb(Q::DTBNode, forest::IntDisjointSets)
 
         @time update_node_roots(Q, forest)
 
-        p = plot_debug(Q.data, forest, edges)
-        gui(p)
+        # p = plot_debug(Q.data, forest, edges)
+        # gui(p)
     end
     return edges
 end
@@ -247,7 +227,6 @@ function find_component_neighbors(Q::DTBNode, R::DTBNode, forest::IntDisjointSet
         n_dQ::Float64 = Q.dQ
 
         pairwise_d = Distances.pairwise(Euclidean(), Q.data, R.data, dims=2) # O(nmin^2)
-        i=0
         @inbounds for (iq, qq) in enumerate(Q.subset), (ir, rr) in enumerate(R.subset) # O(nmin^2) * O(log n)
             if in_same_set(forest, qq, rr)
                 continue
@@ -259,10 +238,9 @@ function find_component_neighbors(Q::DTBNode, R::DTBNode, forest::IntDisjointSet
             if dist_qr < C_dcq[ cq ]
                 C_dcq[ cq ] = dist_qr
                 C_e[ cq ]   = Edge(qq, rr)
-                if dist_qr > n_dQ
+                if dist_qr < n_dQ
                     n_dQ = dist_qr
                 end
-                i += 1
             end
         end
         Q.dQ = n_dQ
@@ -292,4 +270,31 @@ compute min dist. between bounding boxes, i.e. between rectangular boxes Q/R wit
 function distance(q::DTBNode, r::DTBNode)
     rdists = [intervals_distance(xl, xu, yl, yu) for (xl, xu, yl, yu) in zip(q.lb, q.ub, r.lb, r.ub)]
     return sqrt(sum(rdists.^2))
+end
+
+function plot_debug(x, forest, edges::Set{Edge})
+    p = plot(legend=:none)
+
+    # points
+
+    roots = unique(forest.parents)
+    d = Dict(a => Vector() for a in roots)
+
+    for (i, xx) in enumerate(eachcol(x))
+        r = find_root!(forest, i)
+        push!(d[r], xx)
+    end
+
+    for component in values(d)
+        component = hcat(component...)
+        scatter!(component[1,:], component[2,:], ms=3.0)
+    end
+
+    # edges
+    m_edges = to_matrix(collect(edges))
+    for zr in 1:size(m_edges, 1)
+        plot!(x[1,m_edges[zr,:]], x[2,m_edges[zr,:]], linecolor=:gray)
+    end
+
+    return p
 end
