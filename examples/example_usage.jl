@@ -1,3 +1,4 @@
+using Base: Float64, Int64
 # using EMST
 include("../src/emst_dual_boruvka.jl")
 using Plots

@@ -5,6 +5,7 @@ using Statistics
 
 import Base.isequal
 import Base.hash
+import Base.copy
 
 struct Edge
     a::Int64
@@ -19,8 +20,11 @@ function hash(a::Edge)
 end
 function to_matrix(ee::Vector{Edge})
     m::Array{Int64,2} = Array{Int64}(undef, length(ee), 2)
-    for zi = 1:length(ee); m[zi,1] = ee[zi].a; m[zi,2] = ee[zi].b; end
-return m
+    for zi = 1:length(ee)
+        m[zi,1] = ee[zi].a
+        m[zi,2] = ee[zi].b
+    end
+    return m
 end
 
 """
@@ -29,12 +33,6 @@ end
 implements node of a KD tree
 """
 mutable struct DTBNode
-    id::Int64 # identifies the node ; root has 00..00 , then
-              # levels (right/left) are encoded as 01 or 10
-              # i.e. node root->"right"->"right"->"left" ends with:
-              # 10 01 01 00
-              #  l r  r  R
-
     # data / indidces of this kd tree node
     data::Array{Float64,2}
     subset::Vector{Int64}
@@ -48,25 +46,20 @@ mutable struct DTBNode
 
     left::DTBNode
     right::DTBNode
-    
+
     # list of forest roots
     roots::Vector{Int64}
 
-    function DTBNode(id::Int64, data::Array{Float64,2}, subset::Vector{Int64}, box_lb::Vector{Float64}, box_ub::Vector{Float64}, dQ::Float64, roots::Vector{Int64})
-        n = new(id, data, subset, box_lb, box_ub, dQ)
+    function DTBNode(data::Array{Float64,2}, subset::Vector{Int64}, box_lb::Vector{Float64}, box_ub::Vector{Float64}, roots::Vector{Int64})
+        n = new(data, subset, box_lb, box_ub)
         n.left = n
         n.right = n
         n.roots = roots
+        n.dQ = 0
         return n
     end
 end
-function isequal(a::DTBNode, b::DTBNode)
-    return a.id == b.id
-end
-function hash(a::DTBNode)
-    # a.id
-    hash(a.id) # we could also drop this hash.. should not matter..
-end
+
 function is_leaf(n::DTBNode)
     return n.left == n && n.right == n
 end
@@ -80,7 +73,11 @@ To build the tree use:
   kdtree_split!( kdt_root , 10 ) # 10 is the node size where we stop splitting
 """
 function kdtree(xx::Array{Float64,2})
-    root = DTBNode(Int64(0), xx, collect(Int64(1):Int64(size(xx, 2))), fill!(ones(size(xx, 1)), -Inf), fill!(ones(size(xx, 1)), Inf), Inf, collect(Int64(1):Int64(size(xx, 2))))
+    root = DTBNode(xx, 
+                   collect(Int64(1):Int64(size(xx, 2))), 
+                   minimum(xx, dims=2)[:, 1], 
+                   maximum(xx, dims=2)[:, 1], 
+                   collect(Int64(1):Int64(size(xx, 2))))
     return root
 end
 
@@ -119,14 +116,8 @@ function kdtree_split!(node::DTBNode, nmin::Int64)
     box_lb_b[ds] = vs
     box_ub_b     = copy(node.ub)
 
-    id::Int64 = node.id
-    id_depth  = Int(ceil((64 - leading_zeros(id)) / 2)) + 1 # in this cell we are, i.e. we have to shift id_depth times left by two bits..
-    id_l = id   |  (1) << (2 * id_depth)
-    id_r = id   |  (2) << (2 * id_depth)
-
-
-    node.left = DTBNode(id_l, data_a, range_a, box_lb_a, box_ub_a, Inf, range_a)
-    node.right = DTBNode(id_r, data_b, range_b, box_lb_b, box_ub_b, Inf, range_b)
+    node.left = DTBNode(data_a, range_a, box_lb_a, box_ub_a, range_a)
+    node.right = DTBNode(data_b, range_b, box_lb_b, box_ub_b, range_b)
 
     kdtree_split!(node.left, nmin)
     kdtree_split!(node.right, nmin)
@@ -138,11 +129,11 @@ end
 Computes EMST for the given data (where columns are samples).
 nmin is the max number of elements in kd-tree node.
 """
-function compute_emst(data::Array{Float64,2};nmin::Int=64)
+function compute_emst(data::Array{Float64,2};nmin::Int=64, plot::Bool = false)
     nmin64 = Int64(nmin)
     root = kdtree(data)
     kdtree_split!(root, nmin64)
-    edges = dtb(root, IntDisjointSets(size(data, 2)))
+    edges = dtb(root, IntDisjointSets(size(data, 2)); plot=plot)
 
     length :: Float64 = 0
     for edge in edges
@@ -157,42 +148,45 @@ function compute_emst(data::Array{Float64,2};nmin::Int=64)
 end
 
 
+mutable struct CandidateEdge
+    distance :: Float64
+    a :: Int64
+    b :: Int64
+end
+
+
 """
   dtb(q::DTBNode,e::IntDisjointSets)
 
 implements the dual-tree Boruvka algorithm which computes the EMST for the
 given KD-tree.
 """
-function dtb(Q::DTBNode, forest::IntDisjointSets)
+function dtb(Q::DTBNode, forest::IntDisjointSets; plot::Bool = false)
     edges = Set{Edge}()
 
     while forest.ngroups > 1
         ngroups = forest.ngroups;
         println("--> ngroups: $ngroups")
 
-        # prepare dicts for candidate edges..
-        C_dcq = Dict{Int64,Float64}()
-        C_e   = Dict{Int64,Edge}()
-        # init themz
-        roots = unique(forest.parents)
-        for ri in roots
-            C_dcq[ri] = Inf
-        end
+        C :: Vector{CandidateEdge} = [CandidateEdge(Inf, 0, 0) for i=1:length(Q.subset)]
 
-        find_component_neighbors(Q, Q, forest, C_dcq, C_e)
+        @time find_component_neighbors(Q, Q, forest, C)
 
         # and now add the edges..
-        for ne::Edge in values(C_e)
-            union!(forest, ne.a, ne.b)
-            push!(edges, ne)
+        for nn::CandidateEdge in C
+            if nn.a != 0 && !in_same_set(forest, nn.a, nn.b)
+                union!(forest, nn.a, nn.b) ## add check if union occured
+                push!(edges, Edge(nn.a, nn.b))
+            end
         end
 
         update_node_roots(Q, forest)
 
-        p = plot_debug(Q.data, forest, edges)
-        gui(p)
-
-        sleep(1)
+        if plot
+            p = plot_debug(Q.data, forest, edges)
+            gui(p)
+            sleep(1)
+        end
     end
     return edges
 end
@@ -207,16 +201,9 @@ function update_node_roots(Q::DTBNode, forest)
     end
 end
 
+Base.copy(s::IntDisjointSets) = IntDisjointSets(copy(s.parents), copy(s.ranks), s.ngroups)
 
-"""
-Find Component Neighbors
-
-Components are identified by the root of the component
-C_dcq : component distances to candidate edges
-C_e   : component candidate edges (comp i candidate edge is C_e[:,i])
-"""
-function find_component_neighbors(Q::DTBNode, R::DTBNode, forest::IntDisjointSets, C_dcq::Dict{Int64,Float64}, C_e::Dict{Int64,Edge})
-    # check R and Q contain only one tree
+function find_component_neighbors(Q::DTBNode, R::DTBNode, forest::IntDisjointSets, C::Vector{CandidateEdge})
     if length(Q.roots) == 1 && length(R.roots) == 1 && R.roots[1] == Q.roots[1]
         return
     end
@@ -226,65 +213,83 @@ function find_component_neighbors(Q::DTBNode, R::DTBNode, forest::IntDisjointSet
     end
 
     if is_leaf(Q) && is_leaf(R)
-        n_dQ::Float64 = Q.dQ
+        Q.dQ = 0.0
 
-        # @inbounds @fastmath
+        dims = size(Q.data)[1]
         for iq=1:length(Q.subset)
+            qq :: Int64 = Q.subset[iq]
+            cq :: Int64 = find_root!(forest, qq) # tree of q
+            nn ::CandidateEdge = C[cq]
             for ir=1:length(R.subset)
-                qq :: Int64 = Q.subset[iq]
                 rr :: Int64 = R.subset[ir]
 
                 if in_same_set(forest, qq, rr)
                     continue
                 end
 
-                cq :: Int64 = find_root!(forest, qq) # tree of q
+                dist_qr :: Float64 = 0
+                @simd for i=1:dims
+                    dist_qr += (Q.data[i, iq] - R.data[i, ir])^2
+                end
+                dist_qr = sqrt(dist_qr)
 
-                dist_qr :: Float64 = sqrt(sum((Q.data[iq] .- R.data[ir]).^2))
-
-                if dist_qr < C_dcq[ cq ]
-                    C_dcq[ cq ] = dist_qr
-                    C_e[ cq ]   = Edge(qq, rr)
-                    if dist_qr < n_dQ
-                        n_dQ = dist_qr
-                    end
+                if dist_qr < nn.distance
+                    nn.distance = dist_qr
+                    nn.a = qq
+                    nn.b = rr
                 end
             end
+            Q.dQ = max(Q.dQ, nn.distance)
         end
-        Q.dQ = n_dQ
-
         return
     end
 
-    find_component_neighbors(Q.left, R.left, forest,  C_dcq, C_e)
-    find_component_neighbors(Q.right, R.left, forest,  C_dcq, C_e)
-    find_component_neighbors(Q.left, R.right, forest,  C_dcq, C_e)
-    find_component_neighbors(Q.right, R.right, forest,  C_dcq, C_e)
+    if is_leaf(Q)
+        find_component_neighbors(Q, R.left, forest,  C)
+        find_component_neighbors(Q, R.right, forest,  C)
+    elseif is_leaf(R)
+        find_component_neighbors(Q.left, R, forest,  C)
+        find_component_neighbors(Q.right, R, forest,  C)
+    else
+        find_component_neighbors(Q.left, R.left, forest,  C)
+        find_component_neighbors(Q.right, R.left, forest,  C)
+        find_component_neighbors(Q.left, R.right, forest,  C)
+        find_component_neighbors(Q.right, R.right, forest,  C)
+    end
     Q.dQ = max(Q.left.dQ, Q.right.dQ)
 end
 
-
-
-function intervals_distance(xl::Float64, xu::Float64, yl::Float64, yu::Float64) :: Float64
-    if xl <= yl <= xu || xl <= yu <= xu
-        return 0
-    end
-    return min(abs(xl - yu), abs(yl - yu))
-end
 
 """
 compute min dist. between bounding boxes, i.e. between rectangular boxes Q/R with
 """
 function distance(q::DTBNode, r::DTBNode)
-    rdists = [intervals_distance(xl, xu, yl, yu) for (xl, xu, yl, yu) in zip(q.lb, q.ub, r.lb, r.ub)]
-    return sqrt(sum(rdists.^2))
+    dim ::Int64 = length(q.lb)
+    dist :: Float64 = 0
+    for i=1:dim
+        delta = max(q.lb[i], r.lb[i]) - min(q.ub[i], r.ub[i])
+        if delta> 0
+            dist += delta^2
+        end
+    end
+    dist = sqrt(dist)
+
+    return dist
+end
+
+function plot_boxes!(Q::DTBNode, p)
+    if !is_leaf(Q)
+        plot_boxes!(Q.left, p)
+        plot_boxes!(Q.right, p)
+        return
+    end
+    plot!(p, [Q.lb[1], Q.ub[1], Q.ub[1], Q.lb[1], Q.lb[1]],[Q.lb[2], Q.lb[2], Q.ub[2], Q.ub[2], Q.lb[2]], lc=:black)
 end
 
 function plot_debug(x, forest, edges::Set{Edge})
-    p = plot(legend=:none)
+    p = plot(legend=:none, aspect_ratio=:equal)
 
-    # points
-
+    # nodes
     roots = unique(forest.parents)
     d = Dict(a => Vector() for a in roots)
 
@@ -294,6 +299,9 @@ function plot_debug(x, forest, edges::Set{Edge})
     end
 
     for component in values(d)
+        if !(component isa Vector)
+            continue
+        end
         component = hcat(component...)
         scatter!(component[1,:], component[2,:], ms=3.0)
     end
@@ -305,4 +313,16 @@ function plot_debug(x, forest, edges::Set{Edge})
     end
 
     return p
+end
+
+function make_tree(N :: Int64)
+    points :: Vector{Vector{Float64}} = []
+
+    for layer=0:(N-1)
+        for i=1:(2^layer)
+            push!(points, [Float64(i - 2^layer / 2 - 0.5) * 2^(N-layer), Float64(2^(N-layer) / 2)])
+        end
+    end
+
+    return hcat(points...)
 end
