@@ -37,22 +37,22 @@ mutable struct DTBNode
 
     # data / indidces of this kd tree node
     data::Array{Float64,2}
-    subset::Array{Int64}
+    subset::Vector{Int64}
 
     # kd tree node bounds
-    lb::Array{Float64,1}
-    ub::Array{Float64,1}
+    lb::Vector{Float64}
+    ub::Vector{Float64}
 
     # max_{v in this node} ( length of candidate edge of v)
     dQ::Float64
 
     left::DTBNode
     right::DTBNode
-
+    
     # list of forest roots
     roots::Vector{Int64}
 
-    function DTBNode(id::Int64, data::Array{Float64,2}, subset::Array{Int64}, box_lb::Array{Float64,1}, box_ub::Array{Float64,1}, dQ::Float64, roots::Vector{Int64})
+    function DTBNode(id::Int64, data::Array{Float64,2}, subset::Vector{Int64}, box_lb::Vector{Float64}, box_ub::Vector{Float64}, dQ::Float64, roots::Vector{Int64})
         n = new(id, data, subset, box_lb, box_ub, dQ)
         n.left = n
         n.right = n
@@ -176,10 +176,10 @@ function dtb(Q::DTBNode, forest::IntDisjointSets)
         # init themz
         roots = unique(forest.parents)
         for ri in roots
-            C_dcq[ri] = Infx
+            C_dcq[ri] = Inf
         end
 
-        @time find_component_neighbors(Q, Q, forest, C_dcq, C_e)
+        find_component_neighbors(Q, Q, forest, C_dcq, C_e)
 
         # and now add the edges..
         for ne::Edge in values(C_e)
@@ -187,10 +187,12 @@ function dtb(Q::DTBNode, forest::IntDisjointSets)
             push!(edges, ne)
         end
 
-        @time update_node_roots(Q, forest)
+        update_node_roots(Q, forest)
 
-        # p = plot_debug(Q.data, forest, edges)
-        # gui(p)
+        p = plot_debug(Q.data, forest, edges)
+        gui(p)
+
+        sleep(1)
     end
     return edges
 end
@@ -226,20 +228,26 @@ function find_component_neighbors(Q::DTBNode, R::DTBNode, forest::IntDisjointSet
     if is_leaf(Q) && is_leaf(R)
         n_dQ::Float64 = Q.dQ
 
-        pairwise_d = Distances.pairwise(Euclidean(), Q.data, R.data, dims=2) # O(nmin^2)
-        @inbounds for (iq, qq) in enumerate(Q.subset), (ir, rr) in enumerate(R.subset) # O(nmin^2) * O(log n)
-            if in_same_set(forest, qq, rr)
-                continue
-            end
+        # @inbounds @fastmath
+        for iq=1:length(Q.subset)
+            for ir=1:length(R.subset)
+                qq :: Int64 = Q.subset[iq]
+                rr :: Int64 = R.subset[ir]
 
-            cq = find_root!(forest, qq) # tree of q, O(log n)
+                if in_same_set(forest, qq, rr)
+                    continue
+                end
 
-            dist_qr = pairwise_d[iq, ir]
-            if dist_qr < C_dcq[ cq ]
-                C_dcq[ cq ] = dist_qr
-                C_e[ cq ]   = Edge(qq, rr)
-                if dist_qr < n_dQ
-                    n_dQ = dist_qr
+                cq :: Int64 = find_root!(forest, qq) # tree of q
+
+                dist_qr :: Float64 = sqrt(sum((Q.data[iq] .- R.data[ir]).^2))
+
+                if dist_qr < C_dcq[ cq ]
+                    C_dcq[ cq ] = dist_qr
+                    C_e[ cq ]   = Edge(qq, rr)
+                    if dist_qr < n_dQ
+                        n_dQ = dist_qr
+                    end
                 end
             end
         end
